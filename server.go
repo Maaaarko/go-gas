@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Maaaarko/go-gas/db"
 	"github.com/Maaaarko/go-gas/types"
 )
 
@@ -28,74 +29,9 @@ func (e *apiError) Error() string {
 	return e.Err
 }
 
-type Databaser interface {
-	CreateUser(u *types.User) error
-	CreateGasStation(g *types.GasStation) error
-	GetGasStation(name string) (*types.GasStation, error)
-	AddPriceToGasStation(name string, fuelPrices map[string]float64) error
-	GetAllUsers() map[string]types.User
-	GetAllGasStations() map[string]types.GasStation
-	GetAllHistories() map[string]types.History
-}
+type apiFunc func(http.ResponseWriter, *http.Request, db.Databaser) error
 
-type MemoryDatabase struct {
-	Users       map[string]types.User
-	GasStations map[string]types.GasStation
-	Histories   map[string]types.History
-}
-
-func (m *MemoryDatabase) CreateUser(u *types.User) error {
-	m.Users[u.Email] = *u
-	return nil
-}
-
-func (m *MemoryDatabase) CreateGasStation(g *types.GasStation) error {
-	m.GasStations[g.Name] = *g
-	return nil
-}
-
-func (m *MemoryDatabase) GetGasStation(name string) (*types.GasStation, error) {
-	g, ok := m.GasStations[name]
-	if !ok {
-		return nil, &apiError{Err: "Gas station not found", Status: http.StatusNotFound}
-	}
-	return &g, nil
-}
-
-func (m *MemoryDatabase) AddPriceToGasStation(name string, fuelPrices map[string]float64) error {
-	g, ok := m.GasStations[name]
-	if !ok {
-		return &apiError{Err: "Gas station not found", Status: http.StatusNotFound}
-	}
-
-	for fuel, price := range fuelPrices {
-		g.Prices[fuel] = price
-	}
-
-	var record types.HistoryRecord
-	record.Time = time.Now().Unix()
-	record.Prices = fuelPrices
-
-	m.Histories[name] = append(m.Histories[name], record)
-
-	return nil
-}
-
-func (m *MemoryDatabase) GetAllUsers() map[string]types.User {
-	return m.Users
-}
-
-func (m *MemoryDatabase) GetAllGasStations() map[string]types.GasStation {
-	return m.GasStations
-}
-
-func (m *MemoryDatabase) GetAllHistories() map[string]types.History {
-	return m.Histories
-}
-
-type apiFunc func(http.ResponseWriter, *http.Request, Databaser) error
-
-func makeHandler(fn apiFunc, db Databaser) http.HandlerFunc {
+func makeHandler(fn apiFunc, db db.Databaser) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := fn(w, r, db); err != nil {
 			if e, ok := err.(*apiError); ok {
@@ -108,7 +44,7 @@ func makeHandler(fn apiFunc, db Databaser) http.HandlerFunc {
 	}
 }
 
-func createUser(w http.ResponseWriter, r *http.Request, db Databaser) error {
+func createUser(w http.ResponseWriter, r *http.Request, db db.Databaser) error {
 	var body types.CreateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		return &apiError{Err: "Invalid JSON", Status: http.StatusBadRequest}
@@ -123,7 +59,7 @@ func createUser(w http.ResponseWriter, r *http.Request, db Databaser) error {
 	return WriteJSON(w, http.StatusCreated, u.ToResponse())
 }
 
-func getUsers(w http.ResponseWriter, r *http.Request, db Databaser) error {
+func getUsers(w http.ResponseWriter, r *http.Request, db db.Databaser) error {
 	users := make([]types.UserResponse, 0, len(db.GetAllUsers()))
 	for _, u := range db.GetAllUsers() {
 		users = append(users, *u.ToResponse())
@@ -131,7 +67,7 @@ func getUsers(w http.ResponseWriter, r *http.Request, db Databaser) error {
 	return WriteJSON(w, http.StatusOK, users)
 }
 
-func createGasStation(w http.ResponseWriter, r *http.Request, db Databaser) error {
+func createGasStation(w http.ResponseWriter, r *http.Request, db db.Databaser) error {
 	var body types.GasStation
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		return &apiError{Err: "Invalid JSON", Status: http.StatusBadRequest}
@@ -144,7 +80,7 @@ func createGasStation(w http.ResponseWriter, r *http.Request, db Databaser) erro
 	return WriteJSON(w, http.StatusCreated, body)
 }
 
-func getNearbyGasStations(w http.ResponseWriter, r *http.Request, db Databaser) error {
+func getNearbyGasStations(w http.ResponseWriter, r *http.Request, db db.Databaser) error {
 	lat := r.URL.Query().Get("lat")
 	lon := r.URL.Query().Get("lon")
 
@@ -186,7 +122,7 @@ func getNearbyGasStations(w http.ResponseWriter, r *http.Request, db Databaser) 
 	return WriteJSON(w, http.StatusOK, nearby)
 }
 
-func getHistory(w http.ResponseWriter, r *http.Request, db Databaser) error {
+func getHistory(w http.ResponseWriter, r *http.Request, db db.Databaser) error {
 	name := r.PathValue("name")
 
 	g, err := db.GetGasStation(name)
@@ -201,7 +137,7 @@ func getHistory(w http.ResponseWriter, r *http.Request, db Databaser) error {
 	return WriteJSON(w, http.StatusOK, gasStationWithHistory)
 }
 
-func generatePriceLoop(db Databaser, updateInterval time.Duration) {
+func generatePriceLoop(db db.Databaser, updateInterval time.Duration) {
 	for {
 		for _, g := range db.GetAllGasStations() {
 			fuelPrices := make(map[string]float64)
@@ -223,11 +159,7 @@ func generatePriceLoop(db Databaser, updateInterval time.Duration) {
 }
 
 func runServer(config ServerConfig) error {
-	db := &MemoryDatabase{
-		Users:       make(map[string]types.User),
-		GasStations: make(map[string]types.GasStation),
-		Histories:   make(map[string]types.History),
-	}
+	db := db.NewMemoryDatabase()
 	http.HandleFunc("POST /users", makeHandler(createUser, db))
 	http.HandleFunc("GET /users", makeHandler(getUsers, db))
 
