@@ -24,6 +24,10 @@ type apiError struct {
 	Status int
 }
 
+func (e *apiError) Error() string {
+	return e.Err
+}
+
 type Databaser interface {
 	CreateUser(u *types.User) error
 	CreateGasStation(g *types.GasStation) error
